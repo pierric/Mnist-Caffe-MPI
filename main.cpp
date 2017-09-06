@@ -36,7 +36,7 @@ using caffe::SGDSolver;
 using caffe::shared_ptr;
 namespace mpi = boost::mpi;
 
-pair<vector<vector<float>>, int> load_image(const string& path);
+pair<vector<float>, pair<int,int>> load_image(const string& path);
 pair<vector<float>, int> load_label(const string& path);
 
 class BlobCollection {
@@ -141,7 +141,7 @@ int main(int argc, char* argv[]) {
   auto labels = load_label("model/train-labels-idx1-ubyte");
   auto testim = load_image("model/t10k-images-idx3-ubyte");
   auto testlb = load_label("model/t10k-labels-idx1-ubyte");
-  assert(images.second == labels.second);
+  assert(images.second.first == labels.second);
   
   using std::endl;
   out(world) << "mnist loaded" << endl;
@@ -158,17 +158,19 @@ int main(int argc, char* argv[]) {
   auto solver_memory_data = boost::static_pointer_cast<caffe::MemoryDataLayer<float> >(solverNet->layer_by_name("mnist"));
   int batch_size = solver_memory_data->batch_size();
 
-  vector<float> images_shuffled_vec;
-  vector<float> labals_shuffled_vec;
-
-  vector<int> range(images.second, 0);
-  std::iota(range.begin(), range.end(), 0);
-  std::shuffle(range.begin(), range.end(), gen);
-  for (auto it=range.begin(); it!=range.end(); ++it) {
-    std::copy(images.first[*it].begin(), images.first[*it].end(), std::back_inserter(images_shuffled_vec));
-    labals_shuffled_vec.push_back(labels.first[*it]);
+  int img_number = images.second.first;
+  int img_size   = images.second.second;
+  typedef std::uniform_int_distribution<int> distr_t;
+  typedef typename distr_t::param_type param_t;
+  distr_t D;
+  for (int i=img_number-1; i>0; --i) {
+    int j = D(gen, param_t(0, i));
+    auto src = images.first.begin() + i*img_size;
+    auto dst = images.first.begin() + j*img_size;
+    std::swap_ranges(src, src+img_size, dst);
+    std::swap(labels.first[i], labels.first[j]);
   }
-  solver_memory_data->Reset(images_shuffled_vec.data(), labals_shuffled_vec.data(), images.second/batch_size*batch_size);
+  solver_memory_data->Reset(images.first.data(), labels.first.data(), img_number/batch_size*batch_size);
 
   // create a network for testing
   //   it shares the parameters with the previous solver.
@@ -179,12 +181,6 @@ int main(int argc, char* argv[]) {
   auto tester_memory_data = boost::static_pointer_cast<caffe::MemoryDataLayer<float> >(testerNet.layer_by_name("mnist"));
   assert(tester_memory_data->batch_size() == batch_size);
   testerNet.ShareTrainedLayersWith(solverNet.get());
-  
-  vector<float>  testim_vec;
-  vector<float> &testlb_vec = testlb.first;
-  for (auto it=testim.first.begin(); it!=testim.first.end(); ++it) {
-    copy(it->begin(), it->end(), back_inserter(testim_vec));
-  }
   
   out(world) << "data populated" << endl;
   
@@ -227,8 +223,9 @@ int main(int argc, char* argv[]) {
     if (world.rank() == 0) {
       if (iter % NUM_ITERS_PER_TEST == 0) {
         float accuracy = 0;
-        int N = testim.second / batch_size;
-        tester_memory_data->Reset(testim_vec.data(), testlb_vec.data(), testim.second/batch_size*batch_size);      
+        int img_number = testim.second.first;
+        int N = img_number / batch_size;
+        tester_memory_data->Reset(testim.first.data(), testlb.first.data(), N*batch_size);      
         for (int x = 0; x < N; x++) {
           testerNet.Forward();
           auto blob = testerNet.blob_by_name("accuracy");
@@ -243,7 +240,7 @@ int main(int argc, char* argv[]) {
     // {
     //   float accuracy = 0;
     //   int N = testim.second / batch_size;
-    //   tester_memory_data->Reset(testim_vec.data(), testlb_vec.data(), testim.second/batch_size*batch_size);      
+    //   tester_memory_data->Reset(testim.first.data(), testlb.first.data(), testim.second/batch_size*batch_size);      
     //   for (int x = 0; x < N; x++) {
     //     testerNet.Forward();
     //     auto blob = testerNet.blob_by_name("accuracy");
@@ -270,7 +267,7 @@ using std::ifstream;
 using std::istreambuf_iterator;
 using std::transform;
 
-pair<vector<vector<float>>, int> load_image(const string& path) {
+pair<vector<float>, pair<int,int>> load_image(const string& path) {
   char buf[1000];
   ifstream input(path, std::ios::binary);
   input.read(buf, 4);
@@ -286,12 +283,7 @@ pair<vector<vector<float>>, int> load_image(const string& path) {
     istreambuf_iterator<char>(),
     alloc.begin(),
     [](unsigned char c) -> float {return ((float) c) / 255.f;});
-  vector<vector<float>> all;
-  assert(alloc.size() == number * size);
-  for (auto it = alloc.begin(); it != alloc.end(); it+=size) {
-    all.push_back(vector<float>(it, it+size));
-  }
-  return std::make_pair(all, number);
+  return std::make_pair(alloc, std::make_pair(number, size));
 }
 
 pair<vector<float>, int> load_label(const string& path) {
