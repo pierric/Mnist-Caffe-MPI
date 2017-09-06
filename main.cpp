@@ -115,13 +115,12 @@ const int NUM_BATCHES_PER_ITER = 500;
 const int NUM_ITERS_PER_TEST = 3;
 
 std::ostream& out(mpi::communicator &world) {
-  using std::cout;  
-  using std::chrono::system_clock;
-  std::time_t now = system_clock::to_time_t(system_clock::now());
+  using namespace std;
+  time_t now = chrono::system_clock::to_time_t(chrono::system_clock::now());
   char buf[64];
-  std::strftime(buf, 64, "%T", std::localtime(&now));
+  strftime(buf, 64, "%T", localtime(&now));
   return cout << "[" << world.rank() << "] " 
-              << std::fixed << std::setprecision(2)
+              << fixed << setprecision(2)
               << buf
               << " ";
 }
@@ -130,9 +129,6 @@ int main(int argc, char* argv[]) {
   google::InitGoogleLogging(argv[0]);
   mpi::environment env;
   mpi::communicator world;
-
-  std::random_device rd;
-  std::mt19937 gen(rd());
 
   Caffe::set_mode(Caffe::CPU);
   caffe::SignalHandler signal_handler(caffe::SolverAction::STOP, caffe::SolverAction::SNAPSHOT);
@@ -160,6 +156,8 @@ int main(int argc, char* argv[]) {
 
   int img_number = images.second.first;
   int img_size   = images.second.second;
+  std::random_device rd;
+  std::mt19937 gen(rd());
   typedef std::uniform_int_distribution<int> distr_t;
   typedef typename distr_t::param_type param_t;
   distr_t D;
@@ -190,6 +188,9 @@ int main(int argc, char* argv[]) {
     }
 
     BlobCollection reducedWeights;
+    // reducedWeights stores the weights for this training iteration,
+    //   in the very first iteration, it is just the solverNet's weights on node 0
+    //   afterwards, it is average of the weights of the solverNets from all nodes
     if (iter == 0) {
       if (world.rank() == 0) {
         reducedWeights.load(solverNet->params());
@@ -205,7 +206,6 @@ int main(int argc, char* argv[]) {
       
       if (world.rank() == 0) {
         out(world) << "Weights gathered" << endl;
-        // out(world) << "  " << reducedWeightsN.size() << endl;
         for (auto it=reducedWeightsN.begin(); it!=reducedWeightsN.end(); ++it) {
           reducedWeights.add_or_copy(*it);
         }
@@ -213,13 +213,12 @@ int main(int argc, char* argv[]) {
       }
     }
 
-    // distribute the network to all nodes
+    // distribute the reducedWeights to all nodes
     broadcast(world, reducedWeights, 0);
-    // out(world) << "Weights received" << endl;
-    // out(world) << "  " << reducedWeights.size() << " <-> " << solverNet->params().size() << endl;
     reducedWeights.save(solverNet->params());
 
-    // each each slave to do one step of learn
+    // do one step of learn
+    //   periodically, the master does a accuracy testing on the test dataset.
     if (world.rank() == 0) {
       if (iter % NUM_ITERS_PER_TEST == 0) {
         float accuracy = 0;
