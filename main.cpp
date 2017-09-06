@@ -119,7 +119,7 @@ std::ostream& out(mpi::communicator &world) {
   time_t now = chrono::system_clock::to_time_t(chrono::system_clock::now());
   char buf[64];
   strftime(buf, 64, "%T", localtime(&now));
-  return cout << "[" << world.rank() << "] " 
+  return cout << "[" << std::setw(2) << world.rank() << "] " 
               << fixed << setprecision(2)
               << buf
               << " ";
@@ -238,15 +238,16 @@ int main(int argc, char* argv[]) {
     // test on each slave and each step. for debug purpose.
     // {
     //   float accuracy = 0;
-    //   int N = testim.second / batch_size;
-    //   tester_memory_data->Reset(testim.first.data(), testlb.first.data(), testim.second/batch_size*batch_size);      
+    //   int img_number = testim.second.first;
+    //   int N = img_number / batch_size;
+    //   tester_memory_data->Reset(testim.first.data(), testlb.first.data(), N*batch_size);      
     //   for (int x = 0; x < N; x++) {
     //     testerNet.Forward();
     //     auto blob = testerNet.blob_by_name("accuracy");
     //     accuracy += blob->data_at(0,0,0,0);
     //   }
     //   accuracy /= N;
-    //   out(world) << "==> Slave Test accuracy: " << accuracy << endl;
+    //   out(world) << "==> Slave Test accuracy: " << std::setprecision(4) << accuracy << endl;
     // }
   }
 
