@@ -36,7 +36,7 @@ using caffe::SGDSolver;
 using caffe::shared_ptr;
 namespace mpi = boost::mpi;
 
-pair<vector<float>, int> load_image(const string& path);
+pair<vector<vector<float>>, int> load_image(const string& path);
 pair<vector<float>, int> load_label(const string& path);
 
 class BlobCollection {
@@ -68,8 +68,8 @@ void BlobCollection::add_or_copy(const BlobCollection& other) {
   if (_blobs.size() != other._blobs.size())
     throw std::logic_error("Cannot add by different number of Blobs");
   for (int i=0; i<_blobs.size(); ++i) {
-    auto src = _blobs[i];
-    auto dst = other._blobs[i];
+    auto &src = _blobs[i];
+    auto &dst = other._blobs[i];
     if (src.size() != dst.size()) 
       throw std::logic_error("Cannot add two blobs of different size");
     for (int j=0; j<src.size(); ++j) {
@@ -80,8 +80,8 @@ void BlobCollection::add_or_copy(const BlobCollection& other) {
 
 void BlobCollection::divide_by(int n) {
   for (auto blob=_blobs.begin(); blob!=_blobs.end(); ++blob) {
-    for(auto itval=(*blob).begin(); itval!=(*blob).end(); ++itval) {
-      (*itval) /= n;
+    for (int i=0; i < blob->size(); ++i) {
+      (*blob)[i] /= n;
     }
   }
 }
@@ -110,9 +110,9 @@ void BlobCollection::save(const vector<caffe::shared_ptr<Blob<float> > >& params
   }
 }
 
-const int NUM_ITERATIONS = 5;
-const int NUM_BATCHES_PER_ITER = 200;
-const int NUM_ITERS_PER_TEST = 2;
+const int NUM_ITERATIONS = 10;
+const int NUM_BATCHES_PER_ITER = 500;
+const int NUM_ITERS_PER_TEST = 3;
 
 std::ostream& out(mpi::communicator &world) {
   using std::cout;  
@@ -146,6 +146,8 @@ int main(int argc, char* argv[]) {
   using std::endl;
   out(world) << "mnist loaded" << endl;
 
+  // create a solver for learning
+  //   shuffle the dataset, and fill in the input of this solver
   caffe::SolverParameter solver_param1;
   caffe::ReadSolverParamsFromTextFileOrDie("model/mnist_solver.prototxt", &solver_param1);
   shared_ptr<Solver<float> > 
@@ -156,16 +158,40 @@ int main(int argc, char* argv[]) {
   auto solver_memory_data = boost::static_pointer_cast<caffe::MemoryDataLayer<float> >(solverNet->layer_by_name("mnist"));
   int batch_size = solver_memory_data->batch_size();
 
-  // rank-0 is the master, instructing the slaves and test
-  if (world.rank() == 0)
-    solver_memory_data->Reset(testim.first.data(), testlb.first.data(), 10000/batch_size*batch_size);
-  else
-    solver_memory_data->Reset(images.first.data(), labels.first.data(), 60000/batch_size*batch_size);
+  vector<float> images_shuffled_vec;
+  vector<float> labals_shuffled_vec;
 
+  vector<int> range(images.second, 0);
+  std::iota(range.begin(), range.end(), 0);
+  std::shuffle(range.begin(), range.end(), gen);
+  for (auto it=range.begin(); it!=range.end(); ++it) {
+    std::copy(images.first[*it].begin(), images.first[*it].end(), std::back_inserter(images_shuffled_vec));
+    labals_shuffled_vec.push_back(labels.first[*it]);
+  }
+  solver_memory_data->Reset(images_shuffled_vec.data(), labals_shuffled_vec.data(), images.second/batch_size*batch_size);
+
+  // create a network for testing
+  //   it shares the parameters with the previous solver.
+  //   we don't pre-fill it in. that will be before each test.
+  caffe::NetParameter net_param;
+  ReadNetParamsFromTextFileOrDie("model/mnist_net.prototxt", &net_param);
+  caffe::Net<float> testerNet(net_param);
+  auto tester_memory_data = boost::static_pointer_cast<caffe::MemoryDataLayer<float> >(testerNet.layer_by_name("mnist"));
+  assert(tester_memory_data->batch_size() == batch_size);
+  testerNet.ShareTrainedLayersWith(solverNet.get());
+  
+  vector<float>  testim_vec;
+  vector<float> &testlb_vec = testlb.first;
+  for (auto it=testim.first.begin(); it!=testim.first.end(); ++it) {
+    copy(it->begin(), it->end(), back_inserter(testim_vec));
+  }
+  
   out(world) << "data populated" << endl;
   
   for (int iter=0; iter < NUM_ITERATIONS; ++iter) {
-    out(world) << "iteration " << iter << endl;
+    if (world.rank() == 0) {
+      out(world) << "iteration " << iter << endl;
+    }
 
     BlobCollection reducedWeights;
     if (iter == 0) {
@@ -177,25 +203,23 @@ int main(int argc, char* argv[]) {
       vector<BlobCollection> reducedWeightsN;
 
       BlobCollection weight;
-      if (world.rank() > 0)
-        weight.load(solverNet->params());
+      weight.load(solverNet->params());
         
       gather(world, weight, reducedWeightsN, 0);
       
       if (world.rank() == 0) {
         out(world) << "Weights gathered" << endl;
         // out(world) << "  " << reducedWeightsN.size() << endl;
-        auto it=reducedWeightsN.begin()+1;
-        for (; it!=reducedWeightsN.end(); ++it) {
+        for (auto it=reducedWeightsN.begin(); it!=reducedWeightsN.end(); ++it) {
           reducedWeights.add_or_copy(*it);
         }
-        reducedWeights.divide_by(reducedWeightsN.size()-1);
+        reducedWeights.divide_by(reducedWeightsN.size());
       }
     }
 
-    // distribute the network to all slaves
+    // distribute the network to all nodes
     broadcast(world, reducedWeights, 0);
-    out(world) << "Weights received" << endl;
+    // out(world) << "Weights received" << endl;
     // out(world) << "  " << reducedWeights.size() << " <-> " << solverNet->params().size() << endl;
     reducedWeights.save(solverNet->params());
 
@@ -203,19 +227,31 @@ int main(int argc, char* argv[]) {
     if (world.rank() == 0) {
       if (iter % NUM_ITERS_PER_TEST == 0) {
         float accuracy = 0;
-        int N = 10000 / batch_size;
+        int N = testim.second / batch_size;
+        tester_memory_data->Reset(testim_vec.data(), testlb_vec.data(), testim.second/batch_size*batch_size);      
         for (int x = 0; x < N; x++) {
-          solverNet->Forward();
-          auto blob = solverNet->blob_by_name("accuracy");
+          testerNet.Forward();
+          auto blob = testerNet.blob_by_name("accuracy");
           accuracy += blob->data_at(0,0,0,0);
         }
         accuracy /= N;
-        out(world) << "==> Test accuracy: " << accuracy << endl;
+        out(world) << "==> Master Test accuracy: " << accuracy << endl;
       }
     }
-    else {
-      solver1->Step(NUM_BATCHES_PER_ITER);
-    }
+    solver1->Step(NUM_BATCHES_PER_ITER);
+    // test on each slave and each step. for debug purpose.
+    // {
+    //   float accuracy = 0;
+    //   int N = testim.second / batch_size;
+    //   tester_memory_data->Reset(testim_vec.data(), testlb_vec.data(), testim.second/batch_size*batch_size);      
+    //   for (int x = 0; x < N; x++) {
+    //     testerNet.Forward();
+    //     auto blob = testerNet.blob_by_name("accuracy");
+    //     accuracy += blob->data_at(0,0,0,0);
+    //   }
+    //   accuracy /= N;
+    //   out(world) << "==> Slave Test accuracy: " << accuracy << endl;
+    // }
   }
 
   return 0;
@@ -234,7 +270,7 @@ using std::ifstream;
 using std::istreambuf_iterator;
 using std::transform;
 
-pair<vector<float>, int> load_image(const string& path) {
+pair<vector<vector<float>>, int> load_image(const string& path) {
   char buf[1000];
   ifstream input(path, std::ios::binary);
   input.read(buf, 4);
@@ -243,14 +279,19 @@ pair<vector<float>, int> load_image(const string& path) {
   int number = be(buf);
   int rows   = be(buf+4);
   int cols   = be(buf+8);
-  int total  = number * rows * cols;
-  vector<float> alloc(total);
+  int size   = rows * cols;
+  vector<float> alloc(number * size);
   transform(
     (istreambuf_iterator<char>(input)),
     istreambuf_iterator<char>(),
     alloc.begin(),
     [](unsigned char c) -> float {return ((float) c) / 255.f;});
-  return std::make_pair(alloc, number);
+  vector<vector<float>> all;
+  assert(alloc.size() == number * size);
+  for (auto it = alloc.begin(); it != alloc.end(); it+=size) {
+    all.push_back(vector<float>(it, it+size));
+  }
+  return std::make_pair(all, number);
 }
 
 pair<vector<float>, int> load_label(const string& path) {

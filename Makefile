@@ -10,7 +10,7 @@ export CAFFEDIR OPENCVDIR HDFDIR
 
 .PHONY: libs deploy
 main: main.cpp
-	mpiCC -O3 -o $@ -DCPU_ONLY -I${INCDIR} -std=gnu++11 -Wno-deprecated-declarations $< ${LINKOPTS}
+	mpiCC -O3 -o $@ -DCPU_ONLY -I${INCDIR} -std=gnu++11 -Wno-deprecated-declarations -msse2 $< ${LINKOPTS}
 libs:
 	$(MAKE) -C libs all
 deploy: main libs
