@@ -231,7 +231,7 @@ int main(int argc, char* argv[]) {
           accuracy += blob->data_at(0,0,0,0);
         }
         accuracy /= N;
-        out(world) << "==> Master Test accuracy: " << accuracy << endl;
+        out(world) << "==> Master Test accuracy: " << std::setprecision(4) << accuracy << endl;
       }
     }
     solver1->Step(NUM_BATCHES_PER_ITER);
